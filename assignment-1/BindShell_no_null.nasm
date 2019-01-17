@@ -27,11 +27,12 @@ _start:
 	xor rax, rax
 	push rax
 
-	mov dword [rsp-4], eax
-	mov word [rsp-6], 0x5c11
-	;mov word [rsp-8], 0x2
-	mov byte [rsp-8], 0x2
-	sub rsp, 8
+	; mov dword [rsp-4], eax
+	; mov word [rsp-6], 0x5c11
+	; mov word [rsp-8], 0x2
+	push rax			; push another 8 bytes of 0 onto the stack
+	mov word [rsp+2], 0x5c11	; push 2 bytes for the port
+	mov byte [rsp], 0x2		; push a single byte for the inet family
 
 	; bind(sock, (struct sockaddr *)&server, sockaddr_len)
 	; syscall number 49
