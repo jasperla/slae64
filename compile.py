@@ -94,6 +94,8 @@ class Compile():
     else:
         ok('No NULL bytes found')
 
+    info('Shellcode length: {}'.format(len(self.bytecode)))
+
   def compilec(self):
     if not self.wrapper:
       err('You called the wrapper compile function but the wrapper is disabled.')
