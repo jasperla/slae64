@@ -24,7 +24,8 @@ _start:
 	;	%rdx: 0
 	; returns:
 	;	%rax: socket file descriptor
-	mov al, SYS_SOCKET
+	push SYS_SOCKET
+	pop rax
 	mov dil, 0x2
 	mov sil, 0x1
 	xor rdx, rdx
