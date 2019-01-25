@@ -247,6 +247,7 @@ def main():
     help='Encrypt shellcode from the provided file with the provided key')
   parser.add_argument('-k', '--key')
   parser.add_argument('-n', '--nonce')
+  parser.add_argument('-a', '--autorun', action='store_true', default=False)
 
   parser.add_argument('file', nargs=1,
     help='NASM source file or file containing encrypted bytecode')
@@ -280,6 +281,14 @@ def main():
     else:
       decrypter = Crypter(args.key, args.nonce, file, None, compiler)
       decrypter.decrypt()
+
+      if args.autorun:
+        bin = './' + os.path.basename(file.replace('.enc', '.bin'))
+        try:
+          info('Invoking {}'.format(bin))
+          subprocess.call([bin])
+        except Exception as e:
+          err('Failed to run {}: {}'.format(bin, e))
 
 
 if __name__ == '__main__':
