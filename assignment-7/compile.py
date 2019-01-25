@@ -15,10 +15,14 @@
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 import argparse
+import base64
 import os.path
 import re
 import subprocess
 import sys
+
+from Crypto.Cipher import ChaCha20
+import Crypto.Random
 
 
 class Compile():
@@ -96,24 +100,38 @@ class Compile():
 
     info('Shellcode length: {}'.format(len(self.bytecode)))
 
-  def compilec(self):
+    # Turn the bytecode list into a string such as '\x90\x90'
+    self.shellcode = ''.join(['\\x{}'.format(x) for x in self.bytecode])
+
+  def compilec(self, verbose_wrapper=True, cleanup=False):
     if not self.wrapper:
       err('You called the wrapper compile function but the wrapper is disabled.')
 
     info('Compiling {}'.format(self.wrapper))
 
-    # Turn the bytecode list into a string such as '\x90\x90'
-    shellcode = ''.join(['\\x{}'.format(x) for x in self.bytecode])
-
-    wrapper_template = f"""
+    if verbose_wrapper:
+      wrapper_template = f"""
 #include <stdio.h>
 #include <string.h>
 
-char code[] = "{shellcode}";
+char code[] = "{self.shellcode}";
 
 int
 main(int argc, int argv[]) {{
   printf("Shellcode length: %ld\\n", strlen(code));
+  (*(void (*)()) code)();
+  return 0;
+}}
+"""
+    else:
+      wrapper_template = f"""
+#include <stdio.h>
+#include <string.h>
+
+char code[] = "{self.shellcode}";
+
+int
+main(int argc, int argv[]) {{
   (*(void (*)()) code)();
   return 0;
 }}
@@ -130,12 +148,70 @@ main(int argc, int argv[]) {{
     except subprocess.CalledProcessError as e:
       err('Invoked command "{}" failed!\n    Captured output: {}\n   '.format(' '.join(cmd), str(e.output.strip())))
 
+    if cleanup:
+      try:
+        os.unlink(self.wrapper)
+      except Exception as e:
+        err('Failed to cleanup after compiling wrapper')
+
   def compile(self):
     self.assemble()
     self.link()
     self.dumpcode()
     if self.wrapper:
        self.compilec()
+
+
+class Crypter():
+  def __init__(self, key, nonce, filename, shellcode, compiler):
+    self.key = key
+    self.nonce = nonce
+    self.filename = filename
+    self.shellcode = shellcode
+    self.compiler = compiler
+
+  def encrypt(self):
+    key = Crypto.Random.get_random_bytes(32)
+    info('Generated key (base64 encoded): {}'.format(base64.b64encode(key).decode('utf-8')))
+    cipher = ChaCha20.new(key = key)
+
+    try:
+      encrypted_code = cipher.encrypt(self.shellcode.encode('ascii'))
+    except Exception as e:
+      err('Failed to encrypt: {}'.format(e))
+
+    nonce = base64.b64encode(cipher.nonce).decode('utf-8')
+    info('Nonce (base64 encoded): {}'.format(nonce))
+
+    output_file = os.path.basename(self.filename.replace('.nasm', '.enc'))
+
+    try:
+      fh = open(output_file, 'wb')
+      fh.write(encrypted_code)
+      fh.close()
+    except Exception as e:
+      err('Failed to write encrypted bytecode to {}: {}'.format(output_file, e))
+    else:
+      info('Saved encrypted bytecode to {}'.format(output_file))
+
+  def decrypt(self):
+    try:
+      fh = open(self.filename, 'rb')
+      encrypted_code = fh.read()
+      fh.close()
+    except Exception as e:
+      err('Failed to read encrypted bytefrom from {}: {}'.format(self.filename, e))
+
+    bin_name = os.path.basename(self.filename.replace('.enc', '.bin'))
+
+    key = base64.b64decode(self.key)
+    nonce = base64.b64decode(self.nonce)
+    decipher = ChaCha20.new(key=key, nonce=nonce)
+    self.compiler.shellcode = decipher.decrypt(encrypted_code).decode('utf-8')
+    self.compiler.wrapper_output = bin_name
+    self.compiler.compilec(verbose_wrapper=False, cleanup=True)
+
+    info('Decrypted shellcode compiled to {}'.format(bin_name))
 
 
 def err(msg, return_code=1):
@@ -154,13 +230,26 @@ def ok(msg):
 
 def main():
   parser = argparse.ArgumentParser()
+
+  # compile arguments
   parser.add_argument('-D', '--define', required=False,
     help='Define to pass to NASM when assembling code for specific operating system')
   parser.add_argument('-l', '--linker', default='ld')
   parser.add_argument('-c', '--compiler', default='cc')
   parser.add_argument('-w', '--enable-wrapper', action='store_true', default=True,
     help='Compile a shellcode wrapper')
-  parser.add_argument('file', nargs=1)
+
+  # crypter arguments
+  mode_group = parser.add_mutually_exclusive_group()
+  mode_group.add_argument('-d', '--decrypt', action='store_true',
+    help='Decrypt shellcode with the provided key and nonce')
+  mode_group.add_argument('-e', '--encrypt', action='store_true',
+    help='Encrypt shellcode from the provided file with the provided key')
+  parser.add_argument('-k', '--key')
+  parser.add_argument('-n', '--nonce')
+
+  parser.add_argument('file', nargs=1,
+    help='NASM source file or file containing encrypted bytecode')
   args = parser.parse_args()
 
   file = args.file[0]
@@ -168,8 +257,30 @@ def main():
   if not os.path.exists(file):
     err('Provided file "{}" does not exist'.format(file))
 
-  c = Compile(file, args.define, args.linker, args.compiler, args.enable_wrapper)
-  c.compile()
+  if not (args.decrypt or args.encrypt):
+    info('Switching to compile mode')
+    c = Compile(file, args.define, args.linker, args.compiler, args.enable_wrapper)
+    c.compile()
+  else:
+    info('Switching to crypter mode')
+    if args.decrypt and not (args.key and args.nonce):
+      err('--key and --nonce required when decrypting')
+    elif args.encrypt and args.key:
+      warn('--key is ignored; we will generate one for you')
+
+    compiler = Compile(file, args.define, args.linker, args.compiler, args.enable_wrapper)
+
+    if args.encrypt:
+      compiler.assemble()
+      compiler.link()
+      compiler.dumpcode()
+
+      crypter = Crypter(args.key, None, file, compiler.shellcode, None)
+      crypter.encrypt()
+    else:
+      decrypter = Crypter(args.key, args.nonce, file, None, compiler)
+      decrypter.decrypt()
+
 
 if __name__ == '__main__':
   main()
